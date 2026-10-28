@@ -1,0 +1,18 @@
+{
+  "plugins": ["typescript", "oxc", "import"],
+  "env": {
+    "node": true,
+    "es2023": true
+  },
+  "ignorePatterns": ["dist", "coverage", "src/generated"],
+  "rules": {
+    "@typescript-eslint/no-explicit-any": "warn",
+    "@typescript-eslint/no-floating-promises": "warn",
+    "no-console": "off",
+    "eqeqeq": ["error", "smart"],
+    "no-unused-vars": [
+      "error",
+      { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }
+    ]
+  }
+}

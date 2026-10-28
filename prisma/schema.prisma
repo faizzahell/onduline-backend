@@ -1,0 +1,1230 @@
+// Prisma schema for the OFDA Portal.
+// Documentation: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum InvoiceStatus {
+  UPLOADED
+  PROCESSING
+  EXTRACTED
+  VALIDATION_REQUIRED
+  VALIDATED
+  MATCHED
+  SUBMITTED
+  POSTED
+  FAILED
+}
+
+enum OCRJobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+/// How an invoice gets into the system.
+enum InvoiceSource {
+  MANUAL
+  OCR
+}
+
+/// Mirrors OCRJobStatus so the expense engine behaves like the invoice one.
+enum ExpenseOcrStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+// ---------------------------------------------------------------------------
+// Identity & RBAC
+// ---------------------------------------------------------------------------
+
+model User {
+  id       String  @id @default(uuid())
+  email    String  @unique
+  name     String
+  password String
+  isActive Boolean @default(true)
+
+  roles             UserRole[]
+  refreshTokens     RefreshToken[]
+  invoices          Invoice[]
+  validatedInvoices Invoice[]           @relation("ValidatedInvoices")
+  companyAccess     UserCompanyAccess[]
+  employee          Employee?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Role {
+  id          String  @id @default(uuid())
+  name        String  @unique
+  description String?
+
+  users       UserRole[]
+  permissions RolePermission[]
+}
+
+model Permission {
+  id          String  @id @default(uuid())
+  code        String  @unique
+  module      String
+  description String?
+
+  roles RolePermission[]
+}
+
+model UserRole {
+  userId String
+  roleId String
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+}
+
+/// A long-lived refresh token stored as an SHA-256 hash.
+/// The raw value only ever exists on the client side.
+model RefreshToken {
+  id String @id @default(uuid())
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// ---------------------------------------------------------------------------
+// Invoice & OCR
+// ---------------------------------------------------------------------------
+
+model Invoice {
+  id String @id @default(uuid())
+
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
+
+  /// `MANUAL` when the header and its lines are keyed in by hand, `OCR` when
+  /// they come from a document extraction.
+  source InvoiceSource @default(MANUAL)
+
+  invoiceNumber String?
+  vendorName    String?
+  vendorTaxId   String?
+
+  invoiceDate DateTime?
+  dueDate     DateTime?
+  poNumber    String?
+
+  currency String @default("IDR")
+
+  subtotal    Decimal? @db.Decimal(18, 2)
+  taxAmount   Decimal? @db.Decimal(18, 2)
+  totalAmount Decimal? @db.Decimal(18, 2)
+
+  status InvoiceStatus @default(UPLOADED)
+
+  createdById String
+  createdBy   User   @relation(fields: [createdById], references: [id])
+
+  validatedById String?
+  validatedBy   User?     @relation("ValidatedInvoices", fields: [validatedById], references: [id])
+  validatedAt   DateTime?
+
+  files   InvoiceFile[]
+  ocrJobs OCRJob[]
+  lines   InvoiceLine[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([companyId, status])
+  @@index([createdById])
+  @@index([invoiceNumber])
+}
+
+model InvoiceFile {
+  id String @id @default(uuid())
+
+  invoiceId String
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  originalName String
+  storageKey   String
+  mimeType     String
+  size         Int
+
+  createdAt DateTime @default(now())
+
+  @@index([invoiceId])
+}
+
+model OCRJob {
+  id String @id @default(uuid())
+
+  invoiceId String
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  status OCRJobStatus @default(PENDING)
+
+  provider String?
+  model    String?
+
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  errorMessage String?
+
+  result OCRResult?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([invoiceId])
+  @@index([status])
+}
+
+model OCRResult {
+  id String @id @default(uuid())
+
+  ocrJobId String @unique
+  ocrJob   OCRJob @relation(fields: [ocrJobId], references: [id], onDelete: Cascade)
+
+  rawText String?
+  rawJson Json?
+
+  confidence Decimal? @db.Decimal(5, 4)
+
+  createdAt DateTime @default(now())
+}
+
+model InvoiceLine {
+  id String @id @default(uuid())
+
+  invoiceId String
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  lineNumber Int
+
+  description String?
+  quantity    Decimal? @db.Decimal(18, 4)
+  unit        String?
+
+  unitPrice Decimal? @db.Decimal(18, 2)
+  taxAmount Decimal? @db.Decimal(18, 2)
+  lineTotal Decimal? @db.Decimal(18, 2)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([invoiceId])
+}
+
+// ---------------------------------------------------------------------------
+// Expense Management — enums
+// ---------------------------------------------------------------------------
+
+enum EmployeeLevel {
+  STAFF
+  MANAGER
+  DIRECTOR
+}
+
+/// Distinguishes the sales and non-sales approval paths.
+enum EmployeeDivision {
+  SALES
+  NON_SALES
+}
+
+enum ExpenseSource {
+  MANUAL
+  OCR
+  TIKET_IMPORT
+}
+
+/// Verification state of an entry. A DRAFT is incomplete (for example an OCR
+/// line still missing a destination) and cannot be claimed; the employee must
+/// review it, fill in what is missing, and mark it VERIFIED before it becomes
+/// claimable.
+enum ExpenseEntryStatus {
+  DRAFT
+  VERIFIED
+}
+
+enum ClaimStatus {
+  DRAFT
+  SUBMITTED
+  ACCRUED
+  UNDER_REVIEW
+  REVISION_REQUESTED
+  APPROVED
+  POSTED
+  CANCELLED
+}
+
+enum ApprovalDocumentType {
+  EXPENSE_CLAIM
+  PETTY_CASH_BATCH
+  CASH_ADVANCE
+}
+
+/// The role a step plays within an approval chain.
+enum ApprovalStepType {
+  ACCRUE
+  REVIEW
+  APPROVE
+  POST
+}
+
+/// How the person who works on a step is determined.
+enum ApproverType {
+  SPECIFIC_EMPLOYEE
+  DEPARTMENT_HEAD
+  REGIONAL_MANAGER
+  ROLE
+}
+
+enum ApprovalStepStatus {
+  PENDING
+  APPROVED
+  REVISION_REQUESTED
+  SKIPPED
+}
+
+enum PettyCashBatchStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  REVISION_REQUESTED
+  POSTED
+  CANCELLED
+}
+
+enum CashAdvanceType {
+  CASE_BY_CASE
+  YEARLY
+}
+
+enum CashAdvanceStatus {
+  DRAFT
+  SUBMITTED
+  UNDER_REVIEW
+  REVISION_REQUESTED
+  APPROVED
+  POSTED
+  SETTLED
+  CANCELLED
+}
+
+enum EntertainmentKind {
+  LUNCH
+  DINNER
+  COFFEE_BREAK
+  GIFT
+  FLOWER_ARRANGEMENT
+  OTHER
+}
+
+/// The "Jenis Usaha" (type of business) column on the entertainment nominative list.
+enum BusinessRelationType {
+  DISTRIBUTOR
+  CUSTOMER
+  CONSULTANT
+  INTERNAL
+  OTHER
+}
+
+enum BcJournalType {
+  ACCRUAL
+  REVERSAL_PAYMENT
+  PETTY_CASH
+  CASH_ADVANCE
+}
+
+enum BcJournalStatus {
+  PENDING
+  POSTED
+  FAILED
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy
+// ---------------------------------------------------------------------------
+
+/// A single legal entity (OI, OMI, OBM, ...).
+///
+/// Every expense record carries a `companyId` so that a single database can
+/// serve several companies, and the Onduline HO consolidated report only needs
+/// an ordinary query instead of aggregating across databases.
+model Company {
+  id       String  @id @default(uuid())
+  code     String  @unique
+  name     String
+  /// The local bookkeeping currency. Every transaction is recorded in it.
+  currency String  @default("IDR")
+  isActive Boolean @default(true)
+
+  /// The accrual offset account, for example 32001900 Accrued Others.
+  accruedAccountNo   String @default("32001900")
+  accruedAccountName String @default("Accrued Others")
+
+  /// The cash/bank account used for reimbursement payments.
+  bankAccountNo   String?
+  bankAccountName String?
+
+  /// The PIC initials in the General Journal number, for example GJ26-IS0218.
+  journalInitials          String @default("IS")
+  pettyCashJournalInitials String @default("RE")
+
+  /// The area code used on the accrual lines, following the BC worksheet.
+  accrualAreaCode String @default("HO")
+
+  /// OCR is optional, not mandatory. A super administrator enables it per
+  /// company, and while it stays switched off all recording is done manually.
+  ocrInvoiceEnabled Boolean @default(false)
+  ocrExpenseEnabled Boolean @default(false)
+
+  userAccess        UserCompanyAccess[]
+  invoices          Invoice[]
+  expenseOcrJobs    ExpenseOcrJob[]
+  employees         Employee[]
+  departments       Department[]
+  areaCodes         AreaCode[]
+  salesAreas        SalesArea[]
+  marketingCodes    MarketingCode[]
+  expenseCategories ExpenseCategory[]
+  expenseEntries    ExpenseEntry[]
+  expenseClaims     ExpenseClaim[]
+  pettyCashBatches  PettyCashBatch[]
+  cashAdvances      CashAdvance[]
+  approvalRules     ApprovalRule[]
+  documentSequences DocumentSequence[]
+  bcJournalBatches  BcJournalBatch[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// The companies a user is allowed to access, so that one user ID can move
+/// between companies without logging in again.
+model UserCompanyAccess {
+  userId    String
+  companyId String
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@id([userId, companyId])
+  @@index([companyId])
+}
+
+// ---------------------------------------------------------------------------
+// Master data: employees and Business Central dimensions
+// ---------------------------------------------------------------------------
+
+model Department {
+  id        String  @id @default(uuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  code String
+  name String
+
+  /// The HOD role holder, used by the DEPARTMENT_HEAD approval step.
+  headEmployeeId String?
+  headEmployee   Employee? @relation("DepartmentHead", fields: [headEmployeeId], references: [id])
+
+  employees Employee[] @relation("EmployeeDepartment")
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, code])
+}
+
+/// The AREA CODE dimension in BC (RM01, CM01, HO, OTHR, ...).
+model AreaCode {
+  id        String  @id @default(uuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  code String
+  name String
+
+  employees Employee[]
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, code])
+}
+
+/// The SALES AREA CODE dimension in BC, which also determines the regional manager.
+model SalesArea {
+  id        String  @id @default(uuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  code String
+  name String
+
+  /// Used by the REGIONAL_MANAGER approval step.
+  managerEmployeeId String?
+  managerEmployee   Employee? @relation("SalesAreaManager", fields: [managerEmployeeId], references: [id])
+
+  employees Employee[] @relation("EmployeeSalesArea")
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, code])
+}
+
+/// The MARKETING CODE dimension in BC, required for entertainment categories.
+model MarketingCode {
+  id        String  @id @default(uuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  code String
+  name String
+
+  expenseEntries ExpenseEntry[]
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, code])
+}
+
+model Employee {
+  id        String  @id @default(uuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  /// The login account. Empty for employees whose data is only used as a
+  /// dimension, for example former employees who still show up in reports.
+  userId String? @unique
+  user   User?   @relation(fields: [userId], references: [id])
+
+  /// The EMPLOYEE CODE dimension in BC (AKX, MNA, ...).
+  employeeCode String
+  name         String
+  position     String?
+  level        EmployeeLevel    @default(STAFF)
+  division     EmployeeDivision @default(NON_SALES)
+
+  /// The city/posting location, the reference for the meal allowance distance rule.
+  homeBase String?
+
+  departmentId String?
+  department   Department? @relation("EmployeeDepartment", fields: [departmentId], references: [id])
+
+  areaCodeId String?
+  areaCode   AreaCode? @relation(fields: [areaCodeId], references: [id])
+
+  salesAreaId String?
+  salesArea   SalesArea? @relation("EmployeeSalesArea", fields: [salesAreaId], references: [id])
+
+  headedDepartments Department[] @relation("DepartmentHead")
+  managedSalesAreas SalesArea[]  @relation("SalesAreaManager")
+
+  expenseEntries    ExpenseEntry[]
+  expenseClaims     ExpenseClaim[]
+  cashAdvances      CashAdvance[]
+  approvalSteps     ClaimApprovalStep[]
+  approvalRuleSteps ApprovalRuleStep[]
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, employeeCode])
+  @@index([companyId])
+  @@index([departmentId])
+  @@index([salesAreaId])
+}
+
+// ---------------------------------------------------------------------------
+// Master data: categories and rates
+// ---------------------------------------------------------------------------
+
+/// Expense categories and subcategories.
+///
+/// The G/L account number is attached at the deepest level (the subcategory),
+/// as the requirement asks: "COA in linked to subcategory".
+model ExpenseCategory {
+  id        String  @id @default(uuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  code String
+  name String
+
+  parentId String?
+  parent   ExpenseCategory?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children ExpenseCategory[] @relation("CategoryTree")
+
+  /// The BC G/L account number, for example 60005051 for Gasoline/Petrol.
+  glAccountNo   String?
+  glAccountName String?
+
+  /// The petty cash group code (PC2, PC5, PCB, ...).
+  pettyCashCode String?
+
+  /// Meal allowance is the only category that does not require proof.
+  requiresProof Boolean @default(true)
+
+  /// Only entertainment requires a marketing code.
+  requiresMarketingCode Boolean @default(false)
+
+  /// Requires a travel destination to be filled in.
+  requiresDestination Boolean @default(false)
+
+  /// Uses the fixed rate from ExpenseRate rather than the receipt amount.
+  isFixedRate Boolean @default(false)
+
+  /// Entertainment above this threshold needs per-transaction approval.
+  perTransactionApprovalThreshold Decimal? @db.Decimal(18, 2)
+
+  isEntertainment       Boolean @default(false)
+  isMealAllowance       Boolean @default(false)
+  unitOfMeasure         String?
+  availableForExpense   Boolean @default(true)
+  availableForPettyCash Boolean @default(false)
+
+  rates            ExpenseRate[]
+  ocrJobs          ExpenseOcrJob[]
+  expenseEntries   ExpenseEntry[]
+  pettyCashEntries PettyCashEntry[]
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, code])
+  @@index([companyId])
+  @@index([parentId])
+}
+
+/// The fixed rate per category, with a validity period so that a rate change
+/// does not alter the value of claims that are already in the past.
+model ExpenseRate {
+  id         String          @id @default(uuid())
+  categoryId String
+  category   ExpenseCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  amount Decimal @db.Decimal(18, 2)
+
+  effectiveFrom DateTime
+  effectiveTo   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([categoryId, effectiveFrom])
+}
+
+// ---------------------------------------------------------------------------
+// Approval engine
+// ---------------------------------------------------------------------------
+
+/// The rule that determines the approval chain of a document.
+///
+/// Matching uses the company, the document type, the claimant profile (level
+/// and division) and the amount range. The most specific rule is picked by the
+/// highest `priority`. This approach keeps people names in the data rather
+/// than in the code.
+model ApprovalRule {
+  id        String  @id @default(uuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  name         String
+  documentType ApprovalDocumentType
+
+  /// Empty means it applies to every level/division.
+  claimantLevel    EmployeeLevel?
+  claimantDivision EmployeeDivision?
+
+  /// The document amount bounds. Used for example for the Finance Director
+  /// approval that is only required above a certain amount.
+  minAmount Decimal? @db.Decimal(18, 2)
+  maxAmount Decimal? @db.Decimal(18, 2)
+
+  priority Int     @default(0)
+  isActive Boolean @default(true)
+
+  steps ApprovalRuleStep[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([companyId, documentType, isActive])
+}
+
+model ApprovalRuleStep {
+  id     String       @id @default(uuid())
+  ruleId String
+  rule   ApprovalRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  sequence Int
+  stepType ApprovalStepType
+
+  approverType ApproverType
+
+  /// Used when approverType = SPECIFIC_EMPLOYEE.
+  approverEmployeeId String?
+  approverEmployee   Employee? @relation(fields: [approverEmployeeId], references: [id])
+
+  /// Used when approverType = ROLE.
+  approverRoleName String?
+
+  /// The step is skipped when the document amount is below this value.
+  minAmount Decimal? @db.Decimal(18, 2)
+
+  label String?
+
+  @@unique([ruleId, sequence])
+}
+
+// ---------------------------------------------------------------------------
+// Expense claim
+// ---------------------------------------------------------------------------
+
+/// A single expense line.
+///
+/// `expenseDate` is the date on the receipt, `enteredAt` is the moment the line
+/// was recorded and is set by the database. They are kept separate because the
+/// line selection at submit time uses `enteredAt`, not `expenseDate`.
+model ExpenseEntry {
+  id        String  @id @default(uuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id])
+
+  categoryId String
+  category   ExpenseCategory @relation(fields: [categoryId], references: [id])
+
+  expenseDate DateTime @db.Date
+  enteredAt   DateTime @default(now())
+
+  quantity  Decimal @default(1) @db.Decimal(18, 4)
+  unitPrice Decimal @db.Decimal(18, 2)
+  amount    Decimal @db.Decimal(18, 2)
+
+  /// The amount approved by the reviewer. Null as long as nothing was revised.
+  approvedAmount Decimal? @db.Decimal(18, 2)
+
+  description String?
+  destination String?
+  remark      String?
+
+  marketingCodeId String?
+  marketingCode   MarketingCode? @relation(fields: [marketingCodeId], references: [id])
+
+  source ExpenseSource @default(MANUAL)
+
+  /// Verification state. Defaults to VERIFIED so manually recorded and imported
+  /// entries stay immediately claimable; OCR drafts start as DRAFT.
+  status ExpenseEntryStatus @default(VERIFIED)
+
+  /// Reference to the OCR job when this line was created from a receipt extraction.
+  ocrJobId String?
+
+  /// Identifier of the source row from the tiket.com file, which prevents double imports.
+  externalReference String?
+
+  claimId String?
+  claim   ExpenseClaim? @relation(fields: [claimId], references: [id])
+
+  attachments   ExpenseAttachment[]
+  entertainment EntertainmentDetail?
+  mealAllowance MealAllowanceDetail?
+  revisions     ExpenseRevision[]
+  ocrJob        ExpenseOcrJob?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, externalReference])
+  @@index([companyId, employeeId, claimId])
+  @@index([companyId, employeeId, status])
+  @@index([companyId, enteredAt])
+  @@index([expenseDate])
+  @@index([categoryId])
+}
+
+model ExpenseAttachment {
+  id      String       @id @default(uuid())
+  entryId String
+  entry   ExpenseEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+
+  originalName String
+  storageKey   String
+  mimeType     String
+  size         Int
+
+  /// Marks the attachment as payment proof, which is mandatory for amounts above
+  /// the threshold set by policy.
+  isPaymentProof Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  @@index([entryId])
+}
+
+/// Extra entertainment data for the Entertainment Nominative List (tax).
+model EntertainmentDetail {
+  id      String       @id @default(uuid())
+  entryId String       @unique
+  entry   ExpenseEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+
+  merchantName    String
+  merchantAddress String?
+  kind            EntertainmentKind @default(LUNCH)
+
+  relationName         String
+  relationPosition     String?
+  relationPhone        String?
+  relationCompany      String?
+  relationBusinessType BusinessRelationType @default(CUSTOMER)
+
+  notes String?
+
+  /// Per-transaction approval for amounts above the category threshold.
+  approvalRequired Boolean   @default(false)
+  approvedById     String?
+  approvedAt       DateTime?
+  approvalRemark   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// Extra meal allowance data: a fixed daily rate for travel beyond the
+/// defined radius.
+model MealAllowanceDetail {
+  id      String       @id @default(uuid())
+  entryId String       @unique
+  entry   ExpenseEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+
+  startDate DateTime @db.Date
+  endDate   DateTime @db.Date
+  days      Int
+
+  destination String
+
+  /// The one-way distance from the home base, the basis for claim eligibility.
+  oneWayDistanceKm Decimal? @db.Decimal(10, 2)
+
+  /// A Talenta screenshot that stands in for a receipt.
+  attendanceProofKey String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// The amount revision history of a line; a remark and a trace of who did it are mandatory.
+model ExpenseRevision {
+  id      String       @id @default(uuid())
+  entryId String
+  entry   ExpenseEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+
+  previousAmount Decimal @db.Decimal(18, 2)
+  newAmount      Decimal @db.Decimal(18, 2)
+  remark         String
+
+  revisedById String
+  revisedAt   DateTime @default(now())
+
+  @@index([entryId])
+}
+
+model ExpenseClaim {
+  id        String  @id @default(uuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  claimNumber String
+
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id])
+
+  /// The range of entry dates this claim picks up.
+  periodStart DateTime @db.Date
+  periodEnd   DateTime @db.Date
+
+  status ClaimStatus @default(DRAFT)
+
+  /// The total amount submitted and the total that was approved in the end.
+  submittedAmount Decimal  @default(0) @db.Decimal(18, 2)
+  approvedAmount  Decimal? @db.Decimal(18, 2)
+
+  submittedAt DateTime?
+  accruedAt   DateTime?
+  approvedAt  DateTime?
+  postedAt    DateTime?
+
+  entries        ExpenseEntry[]
+  approvalSteps  ClaimApprovalStep[]
+  journalBatches BcJournalBatch[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, claimNumber])
+  @@index([companyId, status])
+  @@index([employeeId])
+}
+
+/// A single approval step on a document, materialised from an ApprovalRule.
+model ClaimApprovalStep {
+  id String @id @default(uuid())
+
+  documentType ApprovalDocumentType
+
+  claimId String?
+  claim   ExpenseClaim? @relation(fields: [claimId], references: [id], onDelete: Cascade)
+
+  pettyCashBatchId String?
+  pettyCashBatch   PettyCashBatch? @relation(fields: [pettyCashBatchId], references: [id], onDelete: Cascade)
+
+  cashAdvanceId String?
+  cashAdvance   CashAdvance? @relation(fields: [cashAdvanceId], references: [id], onDelete: Cascade)
+
+  sequence Int
+  stepType ApprovalStepType
+  label    String?
+
+  /// The employee who is supposed to work on this step, resolved from the rule.
+  assignedEmployeeId String?
+  assignedEmployee   Employee? @relation(fields: [assignedEmployeeId], references: [id])
+
+  /// Used when the step is assigned to a role holder instead of a specific person.
+  assignedRoleName String?
+
+  status ApprovalStepStatus @default(PENDING)
+
+  actedByUserId String?
+  actedAt       DateTime?
+  remark        String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([claimId, sequence])
+  @@index([pettyCashBatchId, sequence])
+  @@index([cashAdvanceId, sequence])
+  @@index([status])
+}
+
+// ---------------------------------------------------------------------------
+// Petty cash
+// ---------------------------------------------------------------------------
+
+/// A single petty cash submission that holds many lines at once.
+model PettyCashBatch {
+  id        String  @id @default(uuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  batchNumber String
+
+  periodStart DateTime @db.Date
+  periodEnd   DateTime @db.Date
+
+  status PettyCashBatchStatus @default(DRAFT)
+
+  totalAmount Decimal @default(0) @db.Decimal(18, 2)
+
+  createdByUserId String
+
+  submittedAt DateTime?
+  approvedAt  DateTime?
+  postedAt    DateTime?
+
+  entries        PettyCashEntry[]
+  approvalSteps  ClaimApprovalStep[]
+  journalBatches BcJournalBatch[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, batchNumber])
+  @@index([companyId, status])
+}
+
+model PettyCashEntry {
+  id      String         @id @default(uuid())
+  batchId String
+  batch   PettyCashBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  expenseDate DateTime @db.Date
+
+  categoryId String
+  category   ExpenseCategory @relation(fields: [categoryId], references: [id])
+
+  description String
+  amount      Decimal @db.Decimal(18, 2)
+
+  /// The BC dimensions per line, because one batch can touch several areas.
+  areaCode       String?
+  employeeCode   String?
+  departmentCode String?
+
+  attachments PettyCashAttachment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([batchId])
+  @@index([categoryId])
+}
+
+model PettyCashAttachment {
+  id      String         @id @default(uuid())
+  entryId String
+  entry   PettyCashEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+
+  originalName String
+  storageKey   String
+  mimeType     String
+  size         Int
+
+  createdAt DateTime @default(now())
+
+  @@index([entryId])
+}
+
+// ---------------------------------------------------------------------------
+// Cash advance
+// ---------------------------------------------------------------------------
+
+model CashAdvance {
+  id        String  @id @default(uuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  advanceNumber String
+
+  type CashAdvanceType
+
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id])
+
+  /// The monthly amount for a yearly advance, or the one-off amount for a
+  /// case-by-case advance.
+  amount Decimal @db.Decimal(18, 2)
+
+  /// The applicable year for a yearly advance.
+  periodYear Int?
+
+  purpose String?
+  status  CashAdvanceStatus @default(DRAFT)
+
+  requestedByUserId String
+
+  submittedAt DateTime?
+  approvedAt  DateTime?
+  postedAt    DateTime?
+
+  /// The year-end settlement result: positive means the company tops it up,
+  /// negative means the employee pays it back.
+  settlementAmount Decimal?  @db.Decimal(18, 2)
+  settledAt        DateTime?
+
+  approvalSteps  ClaimApprovalStep[]
+  journalBatches BcJournalBatch[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, advanceNumber])
+  @@index([companyId, status])
+  @@index([employeeId])
+}
+
+// ---------------------------------------------------------------------------
+// Business Central journals
+// ---------------------------------------------------------------------------
+
+/// BC-style document numbering, for example GJ26-IS0218.
+model DocumentSequence {
+  id        String  @id @default(uuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  /// The prefix without the year, for example "GJ".
+  prefix String
+
+  /// The PIC initials appended after the year, for example "IS" or "RE".
+  initials String
+
+  year       Int
+  lastNumber Int @default(0)
+
+  @@unique([companyId, prefix, initials, year])
+}
+
+/// A General Journal batch ready to be sent to Business Central.
+///
+/// The BC integration is not live yet, so the batch is built and stored here
+/// first. The finance team can export it, and once the BC API is ready the same
+/// batch is sent through `BusinessCentralService` without changing how it is built.
+model BcJournalBatch {
+  id        String  @id @default(uuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  documentNo String
+  type       BcJournalType
+
+  postingDate DateTime @db.Date
+
+  claimId String?
+  claim   ExpenseClaim? @relation(fields: [claimId], references: [id], onDelete: SetNull)
+
+  pettyCashBatchId String?
+  pettyCashBatch   PettyCashBatch? @relation(fields: [pettyCashBatchId], references: [id], onDelete: SetNull)
+
+  cashAdvanceId String?
+  cashAdvance   CashAdvance? @relation(fields: [cashAdvanceId], references: [id], onDelete: SetNull)
+
+  status       BcJournalStatus @default(PENDING)
+  postedAt     DateTime?
+  errorMessage String?
+
+  /// The document number BC returns after a successful posting.
+  bcDocumentNo String?
+
+  lines BcJournalLine[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, documentNo])
+  @@index([companyId, status])
+}
+
+model BcJournalLine {
+  id      String         @id @default(uuid())
+  batchId String
+  batch   BcJournalBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  lineNumber Int
+
+  accountType String  @default("G/L Account")
+  accountNo   String
+  accountName String?
+
+  description String
+
+  currencyCode String @default("IDR")
+
+  /// Positive for debit, negative for credit, following the Amount column on
+  /// the BC General Journal worksheet.
+  amount Decimal @db.Decimal(18, 2)
+
+  areaCode       String?
+  employeeCode   String?
+  departmentCode String?
+  marketingCode  String?
+
+  @@unique([batchId, lineNumber])
+  @@index([batchId])
+}
+
+/// Receipt extraction job for expense records.
+///
+/// Mirrors the invoice OCR engine: the upload creates a job, a worker extracts
+/// the data, and the result is reviewed before it becomes an expense entry.
+/// The suggested category is resolved against the company's own category
+/// master, so the engine works for every category without code changes.
+model ExpenseOcrJob {
+  id String @id @default(uuid())
+
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  uploadedByUserId String
+
+  originalName String
+  storageKey   String
+  mimeType     String
+  size         Int
+
+  status ExpenseOcrStatus @default(PENDING)
+
+  provider   String?
+  model      String?
+  confidence Decimal? @db.Decimal(5, 4)
+
+  /// Raw provider response, kept for auditing extraction quality.
+  rawJson      Json?
+  errorMessage String?
+
+  /// Extracted values. Null means the provider could not determine the field.
+  suggestedCategoryId  String?
+  suggestedCategory    ExpenseCategory? @relation(fields: [suggestedCategoryId], references: [id], onDelete: SetNull)
+  suggestedCategoryRaw String?
+  suggestedDate        DateTime?        @db.Date
+  suggestedAmount      Decimal?         @db.Decimal(18, 2)
+  suggestedTaxAmount   Decimal?         @db.Decimal(18, 2)
+  suggestedMerchant    String?
+  suggestedDescription String?
+
+  /// Entry created from this job, once the reviewer confirms it.
+  expenseEntryId String?       @unique
+  expenseEntry   ExpenseEntry? @relation(fields: [expenseEntryId], references: [id], onDelete: SetNull)
+
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([companyId, status])
+  @@index([uploadedByUserId])
+  @@index([suggestedCategoryId])
+}
