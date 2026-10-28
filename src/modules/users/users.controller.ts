@@ -11,7 +11,7 @@ import {
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 
-import { CurrentCompany } from '../../common/decorators/current-company.decorator';
+import { CurrentCompanyOptional } from '../../common/decorators/current-company.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Permissions } from '../../common/decorators/permissions.decorator';
 import { CompanyAccessGuard } from '../../common/guards/company-access.guard';
@@ -62,7 +62,7 @@ export class UsersController {
   async create(
     @Body() createUserDto: CreateUserDto,
     @CurrentUser() user: AuthenticatedUser,
-    @CurrentCompany() company?: CompanyContext,
+    @CurrentCompanyOptional() company?: CompanyContext,
   ) {
     return this.usersService.create(
       createUserDto,
@@ -77,7 +77,7 @@ export class UsersController {
   })
   async findAll(
     @CurrentUser() user: AuthenticatedUser,
-    @CurrentCompany() company?: CompanyContext,
+    @CurrentCompanyOptional() company?: CompanyContext,
   ) {
     return this.usersService.findAll(await this.resolveActor(user, company));
   }
@@ -86,7 +86,7 @@ export class UsersController {
   async findOne(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: AuthenticatedUser,
-    @CurrentCompany() company?: CompanyContext,
+    @CurrentCompanyOptional() company?: CompanyContext,
   ) {
     return this.usersService.findOne(
       id,
@@ -100,7 +100,7 @@ export class UsersController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() updateUserDto: UpdateUserDto,
     @CurrentUser() user: AuthenticatedUser,
-    @CurrentCompany() company?: CompanyContext,
+    @CurrentCompanyOptional() company?: CompanyContext,
   ) {
     return this.usersService.update(
       id,
@@ -113,7 +113,7 @@ export class UsersController {
   async remove(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: AuthenticatedUser,
-    @CurrentCompany() company?: CompanyContext,
+    @CurrentCompanyOptional() company?: CompanyContext,
   ) {
     return this.usersService.remove(id, await this.resolveActor(user, company));
   }
@@ -124,7 +124,7 @@ export class UsersController {
     @Param('id', ParseUUIDPipe) userId: string,
     @Body() assignRoleDto: AssignRoleDto,
     @CurrentUser() user: AuthenticatedUser,
-    @CurrentCompany() company?: CompanyContext,
+    @CurrentCompanyOptional() company?: CompanyContext,
   ) {
     return this.usersService.assignRole(
       userId,
@@ -139,7 +139,7 @@ export class UsersController {
     @Param('id', ParseUUIDPipe) userId: string,
     @Param('roleId', ParseUUIDPipe) roleId: string,
     @CurrentUser() user: AuthenticatedUser,
-    @CurrentCompany() company?: CompanyContext,
+    @CurrentCompanyOptional() company?: CompanyContext,
   ) {
     return this.usersService.removeRole(
       userId,

@@ -15,7 +15,7 @@ import {
   COMPANY_SWITCH_PERMISSION,
   CompanyContextService,
 } from '../../common/company/company-context.service';
-import { CurrentCompany } from '../../common/decorators/current-company.decorator';
+import { CurrentCompanyOptional } from '../../common/decorators/current-company.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Permissions } from '../../common/decorators/permissions.decorator';
 import { CompanyAccessGuard } from '../../common/guards/company-access.guard';
@@ -55,7 +55,7 @@ export class CompaniesController {
   @ApiOperation({
     summary: 'The active company, or null when the user has no company yet',
   })
-  getActive(@CurrentCompany() company?: CompanyContext) {
+  getActive(@CurrentCompanyOptional() company?: CompanyContext) {
     return company ?? null;
   }
 
