@@ -111,11 +111,7 @@ export class AuthService {
       throw new UnauthorizedException('Account is inactive');
     }
 
-    // const { roles, permissions } = await this.rbacService.getUserAccess(userId);
-
-    const userAccess = await this.rbacService.getUserAccess(userId);
-    const roles = userAccess?.roles ?? [];
-    const permissions = userAccess?.permissions ?? [];
+    const { roles, permissions } = await this.rbacService.getUserAccess(userId);
 
     return {
       id: user.id,
@@ -131,13 +127,7 @@ export class AuthService {
     email: string,
     name: string,
   ): Promise<AuthSession> {
-    // const { roles, permissions } = await this.rbacService.getUserAccess(userId);
-
-    const userAccess = await this.rbacService.getUserAccess(userId);
-  
-    // Berikan fallback array kosong [] jika null/undefined
-    const roles = userAccess?.roles ?? [];
-    const permissions = userAccess?.permissions ?? [];
+    const { roles, permissions } = await this.rbacService.getUserAccess(userId);
 
     const payload: JwtPayload = { sub: userId, email, roles };
 
